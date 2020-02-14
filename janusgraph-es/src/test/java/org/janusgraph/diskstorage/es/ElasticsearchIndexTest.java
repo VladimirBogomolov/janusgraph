@@ -116,7 +116,7 @@ public class ElasticsearchIndexTest extends IndexProviderTest {
     public String getEnglishAnalyzerName() {
         return "english";
     }
-    
+
     @Override
     public String getKeywordAnalyzerName() {
         return "keyword";
@@ -288,7 +288,13 @@ public class ElasticsearchIndexTest extends IndexProviderTest {
         addAlias.setEntity(new StringEntity("{\"actions\": [{\"add\": {\"indices\": [\"test1\", \"test2\"], \"alias\": \"alias1\"}}]}", StandardCharsets.UTF_8));
         IOUtils.closeQuietly(httpClient.execute(host, addAlias));
 
-        initialize("vertex");
+        final Multimap<String, Object> doc1 = HashMultimap.create();
+        doc1.put(TEXT, "abra-cadabra");
+        String store = "vertex";
+        initialize(store);
+        add(store, "doc1", doc1, true);
+        tx.commit();
+
         assertTrue(indexExists(GraphDatabaseConfiguration.INDEX_NAME.getDefaultValue()));
 
         index.clearStorage();
@@ -314,7 +320,7 @@ public class ElasticsearchIndexTest extends IndexProviderTest {
             Mapping.STRING.asParameter(),
             Parameter.of(ParameterType.customParameterName(parameterName), parameterValue));
 
-        index.register(mappingTypeName, field, keyInfo, tx);
+        ((ElasticSearchIndex) index).register(mappingTypeName, field, keyInfo);
 
         String indexName = indexPrefix+"_"+mappingTypeName;
 

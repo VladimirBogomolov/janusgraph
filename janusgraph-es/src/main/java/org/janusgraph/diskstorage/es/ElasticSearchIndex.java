@@ -20,6 +20,8 @@ import static org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration.IN
 import static org.janusgraph.graphdb.configuration.GraphDatabaseConfiguration.INDEX_NS;
 
 import com.google.common.base.Preconditions;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.*;
 import org.janusgraph.diskstorage.es.compat.ESCompatUtils;
 import org.janusgraph.diskstorage.es.mapping.IndexMapping;
@@ -124,7 +126,7 @@ public class ElasticSearchIndex implements IndexProvider {
 
     public static final ConfigNamespace ES_CREATE_EXTRAS_NS =
             new ConfigNamespace(ES_CREATE_NS, "ext", "Overrides for arbitrary settings applied at index creation.\n" +
-            		"See [Elasticsearch](../index-backend/elasticsearch.md#index-creation-options), The full list of possible setting is available at " + 
+            		"See [Elasticsearch](../index-backend/elasticsearch.md#index-creation-options), The full list of possible setting is available at " +
             		"[Elasticsearch index settings](https://www.elastic.co/guide/en/elasticsearch/reference/current/index-modules.html#index-modules-settings).");
 
     public static final ConfigOption<Boolean> USE_EXTERNAL_MAPPINGS =
@@ -140,7 +142,7 @@ public class ElasticSearchIndex implements IndexProvider {
             "The number of primary shards that an index should have." +
             "Default value is 5 on ES 6 and 1 on ES 7", ConfigOption.Type.MASKABLE, Integer.class);
 
-    
+
     public static final ConfigOption<Boolean> ALLOW_MAPPING_UPDATE =
             new ConfigOption<>(ES_CREATE_NS, "allow-mapping-update",
             "Whether JanusGraph should allow a mapping update when registering an index. " +
@@ -312,6 +314,8 @@ public class ElasticSearchIndex implements IndexProvider {
     private final Map<String, String> indexStoreNamesCache = new ConcurrentHashMap<>();
     private final boolean indexStoreNameCacheEnabled;
 
+    private final Map<String, Object> creationIndexLocks = new ConcurrentHashMap<>();
+
     private final AbstractESCompat compat;
     private final ElasticSearchClient client;
     private final String indexName;
@@ -426,17 +430,23 @@ public class ElasticSearchIndex implements IndexProvider {
     private void checkForOrCreateIndex(String index) throws IOException {
         Objects.requireNonNull(client);
         Objects.requireNonNull(index);
-
-        // Create index if it does not useExternalMappings and if it does not already exist
-        if (!useExternalMappings && !client.indexExists(index)) {
-            client.createIndex(index, indexSetting);
-            client.updateIndexSettings(index, MAX_RESULT_WINDOW);
-            try {
-                log.debug("Sleeping {} ms after {} index creation returned from actionGet()", createSleep, index);
-                Thread.sleep(createSleep);
-            } catch (final InterruptedException e) {
-                throw new JanusGraphException("Interrupted while waiting for index to settle in", e);
+        final Object lock = creationIndexLocks.computeIfAbsent(index, ignored -> new Object());
+        try {
+            synchronized (lock) {
+                // Create index if it does not useExternalMappings and if it does not already exist
+                if (!useExternalMappings && !client.indexExists(index)) {
+                    client.createIndex(index, indexSetting);
+                    client.updateIndexSettings(index, MAX_RESULT_WINDOW);
+                    try {
+                        log.debug("Sleeping {} ms after {} index creation returned from actionGet()", createSleep, index);
+                        Thread.sleep(createSleep);
+                    } catch (final InterruptedException e) {
+                        throw new JanusGraphException("Interrupted while waiting for index to settle in", e);
+                    }
+                }
             }
+        } finally {
+            creationIndexLocks.remove(index);
         }
         Preconditions.checkState(client.indexExists(index), "Could not create index: %s",index);
         client.addAlias(indexName, index);
@@ -480,31 +490,61 @@ public class ElasticSearchIndex implements IndexProvider {
         return indexName + INDEX_NAME_SEPARATOR + store.toLowerCase();
     }
 
-    private String getIndexStoreName(String store) {
-
-        if(indexStoreNameCacheEnabled){
-            return indexStoreNamesCache.computeIfAbsent(store, generateIndexStoreNameFunction);
+    private String getOrCreateIndexStoreName(String store) throws BackendException {
+        String indexStoreName = getIndexStoreName(store);
+        if (indexStoreName != null) {
+            return indexStoreName;
+        } else {
+            String newIndexStoreName = generateIndexStoreName(store);
+            indexStoreNamesCache.put(store, newIndexStoreName);
+            return newIndexStoreName;
         }
+    }
 
-        return generateIndexStoreName(store);
+    private String getIndexStoreName(String store) throws BackendException {
+        if (indexStoreNameCacheEnabled) {
+            String cachedName = indexStoreNamesCache.get(store);
+            if (cachedName != null) {
+                return cachedName;
+            }
+        }
+        String indexStoreName = generateIndexStoreName(store);
+        try {
+            if (client.indexExists(indexStoreName)) {
+                if (indexStoreNameCacheEnabled) {
+                    indexStoreNamesCache.put(store, indexStoreName);
+                }
+                return indexStoreName;
+            }
+        } catch (IOException e) {
+            throw convert(e);
+        }
+        return null;
     }
 
     @Override
     public void register(String store, String key, KeyInformation information,
                          BaseTransaction tx) throws BackendException {
+    }
+
+    void register(String store, String key, KeyInformation information) throws BackendException {
         final Class<?> dataType = information.getDataType();
         final Mapping map = Mapping.getMapping(information);
-        Preconditions.checkArgument(map==Mapping.DEFAULT || AttributeUtils.isString(dataType) ||
-                (map==Mapping.PREFIX_TREE && AttributeUtils.isGeo(dataType)),
-                "Specified illegal mapping [%s] for data type [%s]",map,dataType);
-        final String indexStoreName = getIndexStoreName(store);
+        Preconditions.checkArgument(map == Mapping.DEFAULT || AttributeUtils.isString(dataType) ||
+                                    (map == Mapping.PREFIX_TREE && AttributeUtils.isGeo(dataType)),
+            "Specified illegal mapping [%s] for data type [%s]", map, dataType);
+        String indexStoreName = getIndexStoreName(store);
+        if (indexStoreName == null) {
+            indexStoreName = generateIndexStoreName(store);
+        }
         if (useExternalMappings) {
             try {
                 //We check if the externalMapping have the property 'key'
                 final IndexMapping mappings = client.getMapping(indexStoreName, store);
                 if (mappings == null || (!mappings.isDynamic() && !mappings.getProperties().containsKey(key))) {
                     //Error if it is not dynamic and have not the property 'key'
-                    throw new PermanentBackendException("The external mapping for index '"+ indexStoreName + "' and type '" + store + "' do not have property '" + key + "'");
+                    throw new PermanentBackendException(
+                        "The external mapping for index '" + indexStoreName + "' and type '" + store + "' do not have property '" + key + "'");
                 } else if (allowMappingUpdate && mappings.isDynamic()) {
                     //If it is dynamic, we push the unknown property 'key'
                     this.pushMapping(store, key, information);
@@ -522,6 +562,38 @@ public class ElasticSearchIndex implements IndexProvider {
         }
     }
 
+    private boolean isRegistered(String store, String key) throws BackendException {
+        try {
+            String indexStoreName = getIndexStoreName(store);
+            if (indexStoreName == null) {
+                return false;
+            }
+            IndexMapping mappings = client.getMapping(indexStoreName, store);
+            return mappings != null && mappings.getProperties().containsKey(key);
+        } catch (IOException e) {
+            throw convert(e);
+        }
+    }
+
+    private String registerIndexFields(String store,
+                                       List<IndexEntry> indexEntries,
+                                       KeyInformation.IndexRetriever information,
+                                       Map<String, Set<String>> indicesToFieldsCache) throws BackendException {
+        String indexStoreName = getIndexStoreName(store);
+        for (IndexEntry e : indexEntries) {
+            if (indexStoreName == null) {
+                register(store, e.field, information.get(store, e.field));
+                indexStoreName = getIndexStoreName(store);
+            } else if (!indicesToFieldsCache.getOrDefault(indexStoreName, Collections.emptySet()).contains(e.field)
+                       && !isRegistered(store, e.field)) {
+                register(store, e.field, information.get(store, e.field));
+            }
+            indicesToFieldsCache.putIfAbsent(indexStoreName, new HashSet<>());
+            indicesToFieldsCache.get(indexStoreName).add(e.field);
+        }
+        return indexStoreName;
+    }
+
     /**
      * Push mapping to ElasticSearch
      * @param store the type in the index
@@ -530,6 +602,10 @@ public class ElasticSearchIndex implements IndexProvider {
      */
     private void pushMapping(String store, String key,
                              KeyInformation information) throws AssertionError, BackendException {
+        String indexStoreName = getIndexStoreName(store);
+        if (indexStoreName == null) {
+            throw new PermanentBackendException("Index " + generateIndexStoreName(store) + " is not created");
+        }
         final Class<?> dataType = information.getDataType();
         Mapping map = Mapping.getMapping(information);
         final Map<String,Object> properties = new HashMap<>();
@@ -626,7 +702,7 @@ public class ElasticSearchIndex implements IndexProvider {
         final Map<String,Object> mapping = ImmutableMap.of("properties", properties);
 
         try {
-            client.createMapping(getIndexStoreName(store), store, mapping);
+            client.createMapping(indexStoreName, store, mapping);
         } catch (final Exception e) {
             throw convert(e);
         }
@@ -743,11 +819,12 @@ public class ElasticSearchIndex implements IndexProvider {
     public void mutate(Map<String, Map<String, IndexMutation>> mutations, KeyInformation.IndexRetriever information,
                        BaseTransaction tx) throws BackendException {
         final List<ElasticSearchMutation> requests = new ArrayList<>();
+        final Map<String, Set<String>> indicesToFieldsCache = new HashMap<>();
         try {
             for (final Map.Entry<String, Map<String, IndexMutation>> stores : mutations.entrySet()) {
                 final List<ElasticSearchMutation> requestByStore = new ArrayList<>();
                 final String storeName = stores.getKey();
-                final String indexStoreName = getIndexStoreName(storeName);
+                String indexStoreName = getIndexStoreName(storeName);
                 for (final Map.Entry<String, IndexMutation> entry : stores.getValue().entrySet()) {
                     final String documentId = entry.getKey();
                     final IndexMutation mutation = entry.getValue();
@@ -756,7 +833,7 @@ public class ElasticSearchIndex implements IndexProvider {
                     Preconditions.checkArgument(!mutation.isNew() || !mutation.hasDeletions());
                     Preconditions.checkArgument(!mutation.isDeleted() || !mutation.hasAdditions());
                     //Deletions first
-                    if (mutation.hasDeletions()) {
+                    if (mutation.hasDeletions() && indexStoreName != null) {
                         if (mutation.isDeleted()) {
                             log.trace("Deleting entire document {}", documentId);
                             requestByStore.add(ElasticSearchMutation.createDeleteRequest(indexStoreName, storeName,
@@ -771,6 +848,7 @@ public class ElasticSearchIndex implements IndexProvider {
                         }
                     }
                     if (mutation.hasAdditions()) {
+                        indexStoreName = registerIndexFields(storeName, mutation.getAdditions(), information, indicesToFieldsCache);
                         if (mutation.isNew()) { //Index
                             log.trace("Adding entire document {}", documentId);
                             final Map<String, Object> source = getNewDocument(mutation.getAdditions(),
@@ -864,11 +942,12 @@ public class ElasticSearchIndex implements IndexProvider {
     public void restore(Map<String,Map<String, List<IndexEntry>>> documents, KeyInformation.IndexRetriever information,
                         BaseTransaction tx) throws BackendException {
         final List<ElasticSearchMutation> requests = new ArrayList<>();
+        final Map<String, Set<String>> indicesToFieldsCache = new HashMap<>();
         try {
             for (final Map.Entry<String, Map<String, List<IndexEntry>>> stores : documents.entrySet()) {
                 final List<ElasticSearchMutation> requestByStore = new ArrayList<>();
                 final String store = stores.getKey();
-                final String indexStoreName = getIndexStoreName(store);
+                String indexStoreName = getIndexStoreName(store);
                 for (final Map.Entry<String, List<IndexEntry>> entry : stores.getValue().entrySet()) {
                     final String docID = entry.getKey();
                     final List<IndexEntry> content = entry.getValue();
@@ -876,12 +955,15 @@ public class ElasticSearchIndex implements IndexProvider {
                         // delete
                         if (log.isTraceEnabled())
                             log.trace("Deleting entire document {}", docID);
-
+                        if (indexStoreName == null) {
+                            continue;
+                        }
                         requestByStore.add(ElasticSearchMutation.createDeleteRequest(indexStoreName, store, docID));
                     } else {
                         // Add
                         if (log.isTraceEnabled())
                             log.trace("Adding entire document {}", docID);
+                        indexStoreName = registerIndexFields(store, entry.getValue(), information, indicesToFieldsCache);
                         final Map<String, Object> source = getNewDocument(content, information.get(store));
                         requestByStore.add(ElasticSearchMutation.createIndexRequest(indexStoreName, store, docID,
                                 source));
@@ -1093,6 +1175,10 @@ public class ElasticSearchIndex implements IndexProvider {
     @Override
     public Stream<String> query(IndexQuery query, KeyInformation.IndexRetriever informations,
                                 BaseTransaction tx) throws BackendException {
+        final String indexStoreName = getIndexStoreName(query.getStore());
+        if (indexStoreName == null) {
+            return Stream.empty();
+        }
         final ElasticSearchRequest sr = new ElasticSearchRequest();
         final Map<String,Object> esQuery = getFilter(query.getCondition(), informations.get(query.getStore()));
         sr.setQuery(compat.prepareQuery(esQuery));
@@ -1110,7 +1196,6 @@ public class ElasticSearchIndex implements IndexProvider {
 
         ElasticSearchResponse response;
         try {
-            final String indexStoreName = getIndexStoreName(query.getStore());
             final boolean useScroll = sr.getSize() >= batchSize;
             response = client.search(indexStoreName,
                 compat.createRequestBody(sr, useScroll? NULL_PARAMETERS : TRACK_TOTAL_HITS_DISABLED_PARAMETERS),
@@ -1213,6 +1298,10 @@ public class ElasticSearchIndex implements IndexProvider {
     @Override
     public Stream<RawQuery.Result<String>> query(RawQuery query, KeyInformation.IndexRetriever information,
                                                  BaseTransaction tx) throws BackendException {
+        String indexStoreName = getIndexStoreName(query.getStore());
+        if (indexStoreName == null) {
+            return Stream.empty();
+        }
         final int size = query.hasLimit() ? Math.min(query.getLimit() + query.getOffset(), batchSize) : batchSize;
         final boolean useScroll = size >= batchSize;
         final ElasticSearchResponse response = runCommonQuery(query, information, tx, size, useScroll);
@@ -1227,6 +1316,10 @@ public class ElasticSearchIndex implements IndexProvider {
     @Override
     public Long totals(RawQuery query, KeyInformation.IndexRetriever information,
                        BaseTransaction tx) throws BackendException {
+        String indexStoreName = getIndexStoreName(query.getStore());
+        if (indexStoreName == null) {
+            return 0L;
+        }
         long startTime = System.currentTimeMillis();
         long count = runCountQuery(query);
         if(log.isDebugEnabled()){
