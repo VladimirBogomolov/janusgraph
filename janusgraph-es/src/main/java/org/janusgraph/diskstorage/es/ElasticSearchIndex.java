@@ -1198,7 +1198,8 @@ public class ElasticSearchIndex implements IndexProvider {
             final KeyInformation information = informations.get(store).get(orderEntry.getKey());
             final Mapping mapping = Mapping.getMapping(information);
             final Class<?> datatype = orderEntry.getDatatype();
-            sr.addSort(orderEntry.getKey(), order.toLowerCase(), convertToEsDataType(datatype, mapping));
+            String key = hasDualStringMapping(information) ? getDualMappingName(orderEntry.getKey()) : orderEntry.getKey();
+            sr.addSort(key, order.toLowerCase(), convertToEsDataType(datatype, mapping));
         }
     }
 
