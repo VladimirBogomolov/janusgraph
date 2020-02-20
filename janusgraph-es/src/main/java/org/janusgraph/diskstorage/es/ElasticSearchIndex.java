@@ -537,7 +537,7 @@ public class ElasticSearchIndex implements IndexProvider {
             final String textAnalyzer = ParameterType.TEXT_ANALYZER.findParameter(information.getParameters(), null);
             // use keyword type for string mappings unless custom string analyzer is provided
             final Map<String,Object> stringMapping
-                    = stringAnalyzer == null ? compat.createKeywordMapping() : compat.createTextMapping(stringAnalyzer);
+                    = stringAnalyzer == null ? compat.createKeywordMapping() : compat.createStringMapping(stringAnalyzer);
             switch (map) {
                 case STRING:
                     properties.put(key, stringMapping);
@@ -1111,7 +1111,7 @@ public class ElasticSearchIndex implements IndexProvider {
             response = client.search(indexStoreName,
                 compat.createRequestBody(sr, useScroll? NULL_PARAMETERS : TRACK_TOTAL_HITS_DISABLED_PARAMETERS),
                 useScroll);
-            log.debug("First Executed query [{}] in {} ms", query.getCondition(), response.getTook());
+            log.debug("First Executed query [{}] in {} ms", esQuery.toString(), response.getTook());
             final ElasticSearchScroll resultIterator = new ElasticSearchScroll(client, response, sr.getSize());
             final Stream<RawQuery.Result<String>> toReturn
                     = StreamSupport.stream(Spliterators.spliteratorUnknownSize(resultIterator, Spliterator.ORDERED), false);

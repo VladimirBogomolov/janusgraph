@@ -59,6 +59,11 @@ public abstract class AbstractESCompat {
         return ImmutableMap.of(ES_TYPE_KEY, "keyword");
     }
 
+    public Map<String, Object> createStringMapping(String stringAnalyzer) {
+        final ImmutableMap.Builder builder = ImmutableMap.builder().put(ES_TYPE_KEY, "text").put("fielddata", true);
+        return (stringAnalyzer != null ? builder.put(ES_ANALYZER, stringAnalyzer) : builder).build();
+    }
+
     public Map<String,Object> createTextMapping(String textAnalyzer) {
         final ImmutableMap.Builder builder = ImmutableMap.builder().put(ES_TYPE_KEY, "text");
         return (textAnalyzer != null ? builder.put(ES_ANALYZER, textAnalyzer) : builder).build();

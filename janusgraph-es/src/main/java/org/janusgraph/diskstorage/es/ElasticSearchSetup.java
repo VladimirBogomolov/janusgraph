@@ -16,14 +16,16 @@ package org.janusgraph.diskstorage.es;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
+import org.apache.tinkerpop.shaded.jackson.databind.ObjectMapper;
 import org.janusgraph.diskstorage.configuration.Configuration;
 import org.janusgraph.diskstorage.es.rest.RestClientSetup;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
+import java.io.*;
 import java.lang.reflect.Array;
 import java.util.HashMap;
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 
@@ -74,6 +76,26 @@ public enum ElasticSearchSetup {
                     copy[i] = Array.get(val, i);
                 }
                 settings.put(key, Joiner.on(",").join(copy));
+            } else if (val instanceof String) {
+                Object value = val;
+                if (((String) val).startsWith("file://")) {
+                    File file = Paths.get(((String) val).substring(7)).toFile();
+                    if (file.exists()) {
+                        try {
+                            value = new ObjectMapper().readTree(file);
+                        } catch (IOException e) {
+                            log.warn("File " + file + " doesn't contain valid json");
+                        }
+                    }
+                } else if (((String) val).startsWith("classpath://")) {
+                    String path = ((String) val).substring(12);
+                    try (InputStream is = ElasticSearchSetup.class.getClassLoader().getResourceAsStream(path)) {
+                        value = new ObjectMapper().readTree(is);
+                    } catch (IOException e) {
+                        log.warn("File " + val + " doesn't contain valid json");
+                    }
+                }
+                settings.put(key, value);
             } else {
                 // Copy anything else unmodified
                 settings.put(key, val.toString());
