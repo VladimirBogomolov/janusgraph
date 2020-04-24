@@ -415,6 +415,27 @@ public class SolrIndex implements IndexProvider {
     }
 
     @Override
+    public void delete(final String store) throws BackendException {
+        if (mode == Mode.CLOUD) {
+            final CloudSolrClient client = (CloudSolrClient) solrClient;
+            try {
+                if (!checkIfCollectionExists(client, store)) {
+                    final CollectionAdminRequest.Delete deleteRequest = CollectionAdminRequest.deleteCollection(store);
+                    final CollectionAdminResponse deleteResponse = deleteRequest.process(client);
+                    if (deleteResponse.isSuccess()) {
+                        logger.trace("Collection {} successfully deleted.", store);
+                    } else {
+                        throw new SolrServerException(Joiner.on("\n").join(deleteResponse.getErrorMessages()));
+                    }
+                }
+                waitForRecoveriesToFinish(client, store);
+            } catch (final IOException | SolrServerException | InterruptedException | KeeperException e) {
+                throw new PermanentBackendException(e);
+            }
+        }
+    }
+
+    @Override
     public void mutate(Map<String, Map<String, IndexMutation>> mutations, KeyInformation.IndexRetriever information,
                        BaseTransaction tx) throws BackendException {
         logger.debug("Mutating SOLR");

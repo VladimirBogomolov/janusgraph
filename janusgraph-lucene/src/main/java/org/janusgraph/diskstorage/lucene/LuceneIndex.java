@@ -213,6 +213,31 @@ public class LuceneIndex implements IndexProvider {
     }
 
     @Override
+    public void delete(final String store) throws BackendException {
+        Preconditions.checkArgument(StringUtils.isAlphanumeric(store), "Invalid store name: %s", store);
+        writerLock.lock();
+        try {
+            Preconditions.checkArgument(writerLock.isHeldByCurrentThread());
+            IndexWriter writer = writers.get(store);
+            if (writer != null){
+                writer.close();
+            }
+            File dir = new File(basePath + File.separator + store);
+            if (dir.exists()) {
+                if (dir.isDirectory() && dir.canWrite()) {
+                    FileUtils.deleteDirectory(dir);
+                } else {
+                    throw new TemporaryBackendException("Could not delete Lucene index directory" + dir.getAbsolutePath());
+                }
+            }
+        } catch (final IOException e) {
+            throw new TemporaryBackendException("Could not delete Lucene index", e);
+        } finally {
+            writerLock.unlock();
+        }
+    }
+
+    @Override
     public void mutate(Map<String, Map<String, IndexMutation>> mutations, KeyInformation.IndexRetriever information, BaseTransaction tx) throws BackendException {
         final Transaction ltx = (Transaction) tx;
         writerLock.lock();

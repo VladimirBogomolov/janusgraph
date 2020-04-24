@@ -61,6 +61,14 @@ public interface IndexProvider extends IndexInformation {
     void register(String store, String key, KeyInformation information, BaseTransaction tx) throws BackendException;
 
     /**
+     * This method deletes the specified index store.
+     *
+     * @param store Index store
+     * @throws org.janusgraph.diskstorage.BackendException
+     */
+    void delete(String store) throws BackendException;
+
+    /**
      * Mutates the index (adds and removes fields or entire documents)
      *
      * @param mutations Updates to the index. First map contains all the mutations for each store. The inner map contains

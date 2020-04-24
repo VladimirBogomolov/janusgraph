@@ -54,6 +54,11 @@ public class TestMockIndexProvider implements IndexProvider {
     }
 
     @Override
+    public void delete(final String store) throws BackendException {
+
+    }
+
+    @Override
     public void mutate(Map<String, Map<String, IndexMutation>> mutations, KeyInformation.IndexRetriever information, BaseTransaction tx) throws BackendException {
         if (!failAdds) index.mutate(mutations, information,tx);
         else throw new TemporaryBackendException("Blocked mutation");

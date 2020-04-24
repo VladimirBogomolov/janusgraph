@@ -530,6 +530,28 @@ public class ElasticSearchIndex implements IndexProvider {
         }
     }
 
+    @Override
+    public void delete(final String store) throws BackendException {
+        String indexStoreName = getIndexStoreName(store);
+        if (!useExternalMappings) {
+            Objects.requireNonNull(client);
+            try {
+                if (client.indexExists(indexStoreName)) {
+                    client.deleteIndex(indexName);
+                    try {
+                        log.debug("Sleeping {} ms after {} index deletion returned from actionGet()", createSleep, indexStoreName);
+                        Thread.sleep(createSleep);
+                    } catch (final InterruptedException e) {
+                        throw new JanusGraphException("Interrupted while waiting for index to delete", e);
+                    }
+                }
+                Preconditions.checkState(client.indexExists(indexStoreName), "Could not delete index: %s", indexStoreName);
+            } catch (IOException e) {
+                throw new PermanentBackendException(e);
+            }
+        }
+    }
+
     /**
      * Push mapping to ElasticSearch
      * @param store the type in the index
