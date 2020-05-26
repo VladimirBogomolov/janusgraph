@@ -541,11 +541,13 @@ public class ElasticSearchIndex implements IndexProvider {
                     try {
                         log.debug("Sleeping {} ms after {} index deletion returned from actionGet()", createSleep, indexStoreName);
                         Thread.sleep(createSleep);
+                        if (client.indexExists(indexStoreName)) {
+                            log.debug("{} is still exist", indexStoreName);
+                        }
                     } catch (final InterruptedException e) {
                         throw new JanusGraphException("Interrupted while waiting for index to delete", e);
                     }
                 }
-                Preconditions.checkState(client.indexExists(indexStoreName), "Could not delete index: %s", indexStoreName);
             } catch (IOException e) {
                 throw new PermanentBackendException(e);
             }
